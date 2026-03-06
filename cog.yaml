@@ -15,6 +15,7 @@ build:
     - "einops"
     - "vector-quantize-pytorch"
     - "huggingface_hub[hf_transfer]"
+    - "flash-attn"
     # Not: Model ağırlıkları (weights), Docker imajını şişirmemek adına
     # predict.py içindeki setup() fonksiyonunda runtime sırasında indirilir.
 

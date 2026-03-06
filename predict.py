@@ -5,6 +5,7 @@ import uuid
 import torch
 import torchaudio
 import requests
+import importlib.util
 from cog import BasePredictor, Input, Path
 from transformers import AutoModel, AutoProcessor
 
@@ -89,6 +90,15 @@ class Predictor(BasePredictor):
     def setup(self):
         """Modeli belleğe yükle (Sadece bir kez çalışır)"""
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+
+        # Disable the broken cuDNN SDPA backend
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        # Keep these enabled as fallbacks
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+
         self.model_name = "OpenMOSS-Team/MOSS-TTS"
         self.audio_tokenizer_name = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
         self.local_dir = "./moss_model_cache"
@@ -139,11 +149,34 @@ class Predictor(BasePredictor):
         os.environ["HF_HUB_OFFLINE"] = "1"
             
         print("Model RAM'e yükleniyor...")
+        
+        def resolve_attn_implementation() -> str:
+            # Prefer FlashAttention 2 when package + device conditions are met.
+            if (
+                self.device == "cuda"
+                and importlib.util.find_spec("flash_attn") is not None
+                and self.dtype in {torch.float16, torch.bfloat16}
+            ):
+                major, _ = torch.cuda.get_device_capability()
+                if major >= 8:
+                    return "flash_attention_2"
+        
+            # CUDA fallback: use PyTorch SDPA kernels.
+            if self.device == "cuda":
+                return "sdpa"
+        
+            # CPU fallback.
+            return "eager"
+
+        attn_implementation = resolve_attn_implementation()
+        print(f"[INFO] Using attn_implementation={attn_implementation}")
+        
         self.processor = AutoProcessor.from_pretrained(self.local_dir, trust_remote_code=True)
         self.model = AutoModel.from_pretrained(
             self.local_dir, 
             trust_remote_code=True,
-            torch_dtype=torch.bfloat16
+            attn_implementation=attn_implementation,
+            torch_dtype=self.dtype
         ).to(self.device)
         self.model.eval()
         print("Model ve işlemci başarıyla RAM'e yüklendi, API isteklere hazır!")
